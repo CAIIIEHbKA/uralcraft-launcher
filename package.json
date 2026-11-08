@@ -1,0 +1,75 @@
+{
+  "name": "uralcraft-launcher",
+  "productName": "URALCRAFT Launcher",
+  "version": "2.2.0",
+  "description": "Современный лаунчер Minecraft для сервера CAIIIEHbKA & Friends",
+  "main": "src/main/main.js",
+  "author": "Sasha & Friends",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "smoke": "electron . --smoke-test",
+    "verify": "node scripts/verify-core.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win nsis portable",
+    "dist:portable": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "adm-zip": "^0.6.1"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "ru.uralcraft.launcher",
+    "productName": "URALCRAFT Launcher",
+    "copyright": "Sasha & Friends",
+    "asar": true,
+    "compression": "maximum",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json",
+      "!**/*.map",
+      "!**/__pycache__/**"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "URALCRAFT-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "URALCRAFT",
+      "uninstallDisplayName": "URALCRAFT Launcher",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "URALCRAFT-Portable-${version}.${ext}"
+    }
+  }
+}
