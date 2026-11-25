@@ -399,14 +399,29 @@ class LauncherEngine extends EventEmitter {
     if (config.shaders || config.voiceChat) {
       this.setPhase('mods', 0.05, config.shaders ? 'Проверяю моды...' : 'Проверяю Simple Voice Chat...', {}, true);
       if (config.shaders) {
-      await ensureShaderMods(vanilla.id, {
-        signal,
-        log: (message, level) => this.log(message, level),
-        onProgress: (progress) => {
-          const fraction = progress.total ? progress.index / progress.total : 0.5;
-          this.setPhase('mods', fraction, progress.detail || 'Моды графики...', {}, false);
-        },
-      });
+        await ensureShaderMods(vanilla.id, {
+          signal,
+          log: (message, level) => this.log(message, level),
+          onProgress: (progress) => {
+            const fraction = progress.total ? progress.index / progress.total : 0.5;
+            this.setPhase('mods', fraction, progress.detail || 'Моды графики...', {}, false);
+          },
+        });
+      } else {
+        // Fabric still loads Sodium/Iris from the mods folder even with the
+        // shader toggle off. Check the installed pair and repair it only if
+        // it is actually incompatible.
+        try {
+          await ensureShaderMods(vanilla.id, {
+            enabled: false,
+            repairExisting: true,
+            signal,
+            log: (message, level) => this.log(message, level),
+          });
+        } catch (error) {
+          if (signal?.aborted) throw abortError();
+          this.log(`Не удалось проверить совместимость Sodium/Iris: ${error.message}`, 'warn');
+        }
       }
       await ensureVoiceChat(vanilla.id, {
         enabled: config.voiceChat,

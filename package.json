@@ -1,7 +1,7 @@
 {
   "name": "uralcraft-launcher",
   "productName": "URALCRAFT Launcher",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Современный лаунчер Minecraft для сервера CAIIIEHbKA & Friends",
   "main": "src/main/main.js",
   "author": "Sasha & Friends",
@@ -17,7 +17,8 @@
     "dist:portable": "electron-builder --win portable"
   },
   "dependencies": {
-    "adm-zip": "^0.6.1"
+    "adm-zip": "^0.6.1",
+    "semver": "^7.8.5"
   },
   "devDependencies": {
     "electron": "^45.0.0",

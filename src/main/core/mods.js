@@ -2,6 +2,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const AdmZip = require('adm-zip');
+const semver = require('semver');
 const {
   MODRINTH_API,
   MODS_DIR,
@@ -9,18 +11,30 @@ const {
   RESOURCEPACKS_DIR,
   CONFIG_DIR,
   GAME_DIR,
+  CACHE_DIR,
 } = require('./paths');
 const { fetchJson, downloadFile } = require('./net');
 const { humanBytes, abortError } = require('./utils');
 
+const SODIUM_MOD = { id: 'AANobbMI', label: 'Sodium', pattern: /^sodium-fabric-.*\.jar$/i };
+const IRIS_MOD = { id: 'YL57xq9U', label: 'Iris', pattern: /^iris-fabric-.*\.jar$/i };
+
 const SHADER_MODS = [
   { id: 'P7dR8mSH', label: 'Fabric API', pattern: /^fabric-api-.*\.jar$/i },
-  { id: 'AANobbMI', label: 'Sodium', pattern: /^sodium-fabric-.*\.jar$/i },
-  { id: 'YL57xq9U', label: 'Iris', pattern: /^iris-fabric-.*\.jar$/i },
+  SODIUM_MOD,
+  IRIS_MOD,
   { id: '9s6osm5g', label: 'Cloth Config', pattern: /^cloth-config-.*\.jar$/i },
   { id: 'Va8PJBFX', label: 'RenderScale', pattern: /^renderscale-.*\.jar$/i },
   { id: '4I1XuqiY', label: 'Entity Model Features', pattern: /^entity_model_features-.*\.jar$/i },
   { id: 'BVzZfTc1', label: 'Entity Texture Features', pattern: /^entity_texture_features-.*\.jar$/i },
+];
+
+// Iris is the most constrained mod, so keep it first: the resolver prefers the
+// newest Iris and then picks the newest Sodium build that Iris accepts.
+const RESOLVE_ORDER = [
+  IRIS_MOD,
+  SODIUM_MOD,
+  ...SHADER_MODS.filter((mod) => mod.id !== SODIUM_MOD.id && mod.id !== IRIS_MOD.id),
 ];
 
 const SHADER_PACK = {
@@ -39,16 +53,36 @@ const ANIMATIONS_PACK = {
 // need the matching server-side plugin/mod, but the client jar is required for
 // the in-game voice UI and microphone connection.
 const VOICE_CHAT_MOD = {
-  id: '9eGQg6ZK',
+  id: '9eGKb6K1',
   label: 'Simple Voice Chat',
   pattern: /^voicechat-fabric-.*\.jar$/i,
 };
+
+const MOD_META_DIR = path.join(CACHE_DIR, 'mod-meta');
+const metadataCache = new Map();
 
 function sortVersions(versions) {
   return [...versions].sort((a, b) => String(b.date_published || '').localeCompare(String(a.date_published || '')));
 }
 
-async function findModrinthFile(projectId, { gameVersion, loader, allowAnyVersion = false, signal } = {}) {
+function versionToInfo(version, projectId) {
+  const files = Array.isArray(version.files) ? version.files : [];
+  const file = files.find((item) => item.primary) || files[0];
+  if (!file?.url) throw new Error(`Modrinth: у ${projectId || version.project_id} нет файла`);
+  return {
+    projectId: version.project_id || projectId || null,
+    versionId: version.id || null,
+    filename: path.basename(file.filename || `${projectId || 'mod'}.jar`),
+    url: file.url,
+    sha1: file.hashes?.sha1 || null,
+    size: file.size || null,
+    version: version.version_number || '',
+    datePublished: version.date_published || '',
+    dependencies: Array.isArray(version.dependencies) ? version.dependencies : [],
+  };
+}
+
+async function fetchModrinthVersions(projectId, { gameVersion, loader, allowAnyVersion = false, signal } = {}) {
   const params = new URLSearchParams();
   if (gameVersion) params.set('game_versions', JSON.stringify([gameVersion]));
   if (loader) params.set('loaders', JSON.stringify([loader]));
@@ -60,22 +94,36 @@ async function findModrinthFile(projectId, { gameVersion, loader, allowAnyVersio
     const fallbackUrl = `${MODRINTH_API}/project/${encodeURIComponent(projectId)}/version${fallbackParams.size ? `?${fallbackParams}` : ''}`;
     versions = await fetchJson(fallbackUrl, { signal, timeout: 30000 });
   }
-  if (!Array.isArray(versions) || !versions.length) {
+  return Array.isArray(versions) ? versions : [];
+}
+
+function selectVersionCandidates(versions) {
+  const releases = versions.filter((item) => item.version_type === 'release');
+  return sortVersions(releases.length ? releases : versions);
+}
+
+async function findModrinthFile(projectId, { gameVersion, loader, allowAnyVersion = false, beforeDate = null, signal } = {}) {
+  const versions = await fetchModrinthVersions(projectId, { gameVersion, loader, allowAnyVersion, signal });
+  if (!versions.length) {
     throw new Error(`Modrinth: нет версии для ${projectId}${gameVersion ? ` / ${gameVersion}` : ''}`);
   }
-  const releases = versions.filter((item) => item.version_type === 'release');
-  const candidates = sortVersions(releases.length ? releases : versions);
-  const version = candidates[0];
-  const files = Array.isArray(version.files) ? version.files : [];
-  const file = files.find((item) => item.primary) || files[0];
-  if (!file?.url) throw new Error(`Modrinth: у ${projectId} нет файла`);
-  return {
-    filename: path.basename(file.filename || `${projectId}.jar`),
-    url: file.url,
-    sha1: file.hashes?.sha1 || null,
-    size: file.size || null,
-    version: version.version_number || '',
-  };
+  let pool = versions;
+  if (beforeDate) {
+    pool = pool.filter((item) => String(item.date_published || '') <= String(beforeDate));
+    if (!pool.length) {
+      throw new Error(`Modrinth: у ${projectId} нет версии, выпущенной до ${beforeDate}`);
+    }
+  }
+  const candidates = selectVersionCandidates(pool);
+  return versionToInfo(candidates[0], projectId);
+}
+
+async function listModrinthCandidates(projectId, { gameVersion, loader = 'fabric', signal, limit = 10 } = {}) {
+  const versions = await fetchModrinthVersions(projectId, { gameVersion, loader, signal });
+  if (!versions.length) throw new Error(`Modrinth: нет версии для ${projectId} / ${gameVersion}`);
+  return selectVersionCandidates(versions)
+    .slice(0, limit)
+    .map((version) => versionToInfo(version, projectId));
 }
 
 function findExisting(dir, pattern) {
@@ -99,52 +147,344 @@ function removeOtherVersions(dir, pattern, keepName) {
   }
 }
 
-async function ensureMod(projectId, { gameVersion, loader = 'fabric', signal, log, onProgress, label, pattern }) {
+function versionMatches(version, predicate) {
+  const predicates = Array.isArray(predicate) ? predicate : [predicate];
+  return predicates.some((raw) => {
+    if (typeof raw !== 'string') return false;
+    const range = raw.trim();
+    if (!range) return false;
+    if (range === '*' || /^x$/i.test(range)) return true;
+    let candidate = String(version || '').trim();
+    if (!candidate) return false;
+    if (!semver.valid(candidate)) {
+      const coerced = semver.coerce(candidate);
+      if (!coerced) return false;
+      candidate = coerced.version;
+    }
+    try {
+      return semver.satisfies(candidate, range, { includePrerelease: true, loose: true });
+    } catch {
+      return false;
+    }
+  });
+}
+
+function readFabricMetadata(filePath) {
+  const zip = new AdmZip(filePath);
+  const entry = zip.getEntry('fabric.mod.json');
+  if (!entry) return null;
+  const text = entry.getData().toString('utf8');
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // A few mods leave raw control characters in description strings.
+    parsed = JSON.parse(text.replace(/[\u0000-\u001f]+/g, ' '));
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    id: String(parsed.id || ''),
+    version: String(parsed.version || ''),
+    depends: parsed.depends && typeof parsed.depends === 'object' ? parsed.depends : {},
+    breaks: parsed.breaks && typeof parsed.breaks === 'object' ? parsed.breaks : {},
+    conflicts: parsed.conflicts && typeof parsed.conflicts === 'object' ? parsed.conflicts : {},
+  };
+}
+
+function metadataCacheFile(info) {
+  const safe = `${info.projectId || 'mod'}-${info.versionId || path.basename(info.filename, '.jar')}`
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_');
+  return path.join(MOD_META_DIR, `${safe}.jar`);
+}
+
+async function loadModMetadata(info, { signal, log } = {}) {
+  const key = info.versionId || `${info.projectId}:${info.filename}`;
+  if (metadataCache.has(key)) return metadataCache.get(key);
+
+  let meta = null;
+  let sourcePath = null;
+  try {
+    const installed = path.join(MODS_DIR, info.filename);
+    if (fs.existsSync(installed)) {
+      try {
+        meta = readFabricMetadata(installed);
+        if (meta) sourcePath = installed;
+      } catch (error) {
+        // A truncated/corrupt jar must be replaced, not treated as a valid
+        // candidate that forces the resolver to downgrade.
+        try {
+          fs.rmSync(installed, { force: true });
+        } catch {
+          // ignore cleanup errors
+        }
+        if (log) log(`${info.filename} повреждён (${error.message}); скачиваю заново`, 'warn');
+        meta = null;
+      }
+    }
+    if (!meta) {
+      const cached = metadataCacheFile(info);
+      await downloadFile({
+        url: info.url,
+        dest: cached,
+        expectedSha1: info.sha1,
+        expectedSize: info.size,
+        signal,
+        timeout: 180000,
+        verifySha1: true,
+      });
+      meta = readFabricMetadata(cached);
+      if (meta) sourcePath = cached;
+    }
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    if (log) log(`Не удалось прочитать метаданные ${info.filename}: ${error.message}`, 'warn');
+  }
+
+  const record = meta ? { ...meta, info, sourcePath } : null;
+  metadataCache.set(key, record);
+  return record;
+}
+
+function localModEntry(spec) {
+  const filename = findExisting(MODS_DIR, spec.pattern);
+  if (!filename) return null;
+  const filePath = path.join(MODS_DIR, filename);
+  try {
+    const meta = readFabricMetadata(filePath);
+    if (!meta) return null;
+    return {
+      spec,
+      info: {
+        projectId: spec.id,
+        versionId: null,
+        filename,
+        url: null,
+        sha1: null,
+        size: null,
+        version: meta.version,
+        datePublished: '',
+        dependencies: [],
+      },
+      meta,
+      sourcePath: filePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function predicateLabel(predicate) {
+  return Array.isArray(predicate) ? predicate.join(' || ') : String(predicate);
+}
+
+function compareEntries(from, target) {
+  const targetId = target.meta.id;
+  if (!targetId) return null;
+
+  const depends = from.meta.depends || {};
+  if (Object.prototype.hasOwnProperty.call(depends, targetId)
+    && !versionMatches(target.meta.version, depends[targetId])) {
+    return {
+      type: 'depends',
+      from,
+      target,
+      predicate: depends[targetId],
+      reason: `${from.spec.label} ${from.meta.version} требует ${target.spec.label} ${predicateLabel(depends[targetId])}, а выбран ${target.meta.version}`,
+    };
+  }
+
+  for (const kind of ['breaks', 'conflicts']) {
+    const map = from.meta[kind] || {};
+    if (Object.prototype.hasOwnProperty.call(map, targetId)
+      && versionMatches(target.meta.version, map[targetId])) {
+      return {
+        type: kind,
+        from,
+        target,
+        predicate: map[targetId],
+        reason: `${from.spec.label} ${from.meta.version} несовместим с ${target.spec.label} ${target.meta.version} (${kind}: ${predicateLabel(map[targetId])})`,
+      };
+    }
+  }
+  return null;
+}
+
+function collectIssues(entry, selected) {
+  const issues = [];
+  for (const other of selected) {
+    const forward = compareEntries(entry, other);
+    if (forward) issues.push(forward);
+    const backward = compareEntries(other, entry);
+    if (backward) issues.push(backward);
+  }
+  return issues;
+}
+
+async function resolveModSet(specs, gameVersion, { signal, log, limit = 10, maxChecks = 300 } = {}) {
+  const candidates = new Map();
+  for (const spec of specs) {
+    candidates.set(spec.id, await listModrinthCandidates(spec.id, {
+      gameVersion,
+      loader: 'fabric',
+      signal,
+      limit,
+    }));
+  }
+
+  let checks = 0;
+  const loggedRejections = new Set();
+
+  async function search(position, selected) {
+    if (position >= specs.length) return selected;
+    const spec = specs[position];
+    for (const info of candidates.get(spec.id)) {
+      checks += 1;
+      if (checks > maxChecks) {
+        throw new Error('слишком много вариантов модов для проверки совместимости');
+      }
+      const meta = await loadModMetadata(info, { signal, log });
+      if (!meta) continue;
+      const entry = { spec, info, meta, sourcePath: meta.sourcePath };
+      const issues = collectIssues(entry, selected);
+      if (issues.length) {
+        const reason = issues[0].reason;
+        if (log && !loggedRejections.has(reason)) {
+          loggedRejections.add(reason);
+          log(reason, 'warn');
+        }
+        continue;
+      }
+      const result = await search(position + 1, [...selected, entry]);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  const result = await search(0, []);
+  if (!result) throw new Error('не удалось найти совместимые версии модов');
+  if (log) {
+    const summary = result.map((entry) => `${entry.spec.label} ${entry.meta.version}`).join(', ');
+    log(`Совместимые версии: ${summary}`, 'ok');
+  }
+  return result;
+}
+
+async function copyFileAtomic(source, dest) {
+  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+  const temp = `${dest}.part`;
+  await fs.promises.copyFile(source, temp);
+  await fs.promises.rm(dest, { force: true });
+  await fs.promises.rename(temp, dest);
+}
+
+async function ensureMod(projectId, {
+  gameVersion,
+  loader = 'fabric',
+  signal,
+  log,
+  onProgress,
+  label,
+  pattern,
+  info = null,
+  sourcePath = null,
+}) {
   fs.mkdirSync(MODS_DIR, { recursive: true });
   try {
-    const info = await findModrinthFile(projectId, { gameVersion, loader, signal });
-    const dest = path.join(MODS_DIR, info.filename);
-    await downloadFile({
-      url: info.url,
-      dest,
-      expectedSha1: info.sha1,
-      expectedSize: info.size,
-      signal,
-      timeout: 180000,
-    });
-    removeOtherVersions(MODS_DIR, pattern, info.filename);
-    if (log) log(`${label}: ${info.version || info.filename}`, 'ok');
-    if (onProgress) onProgress(label, info.filename);
-    return { path: dest, skipped: false, filename: info.filename, version: info.version };
+    const resolved = info || await findModrinthFile(projectId, { gameVersion, loader, signal });
+    const dest = path.join(MODS_DIR, resolved.filename);
+    const fromInstalled = sourcePath && path.resolve(sourcePath) === path.resolve(dest);
+    if (sourcePath && !fromInstalled && fs.existsSync(sourcePath)) {
+      await copyFileAtomic(sourcePath, dest);
+    } else if (!fromInstalled) {
+      await downloadFile({
+        url: resolved.url,
+        dest,
+        expectedSha1: resolved.sha1,
+        expectedSize: resolved.size,
+        signal,
+        timeout: 180000,
+        verifySha1: true,
+      });
+    }
+    removeOtherVersions(MODS_DIR, pattern, resolved.filename);
+    if (log) log(`${label}: ${resolved.version || resolved.filename}`, 'ok');
+    if (onProgress) onProgress(label, resolved.filename);
+    return { path: dest, skipped: false, filename: resolved.filename, version: resolved.version };
   } catch (error) {
     if (signal?.aborted) throw abortError();
     const existing = findExisting(MODS_DIR, pattern);
     if (!existing) throw new Error(`${label}: ${error.message}`);
+    if (info?.filename && existing !== info.filename) {
+      throw new Error(`${label}: нужна совместимая версия ${info.filename}, но установить её не удалось (${error.message})`);
+    }
     if (log) log(`${label}: использую уже скачанный ${existing}`, 'warn');
     if (onProgress) onProgress(label, existing);
     return { path: path.join(MODS_DIR, existing), skipped: true, filename: existing, version: 'локальная версия' };
   }
 }
 
-async function ensureShaderMods(gameVersion, { signal, log, onProgress } = {}) {
+async function installResolvedMods(selected, { signal, log, onProgress } = {}) {
+  const byId = new Map(selected.map((entry) => [entry.spec.id, entry]));
+  const orderedSpecs = SHADER_MODS.filter((spec) => byId.has(spec.id));
   const results = [];
-  for (let i = 0; i < SHADER_MODS.length; i += 1) {
-    const mod = SHADER_MODS[i];
-    if (onProgress) onProgress({ stage: 'mods', index: i + 1, total: SHADER_MODS.length, detail: `Мод ${mod.label}...` });
-    const result = await ensureMod(mod.id, {
-      gameVersion,
-      loader: 'fabric',
+  for (let i = 0; i < orderedSpecs.length; i += 1) {
+    const spec = orderedSpecs[i];
+    const entry = byId.get(spec.id);
+    if (onProgress) {
+      onProgress({
+        stage: 'mods',
+        index: i + 1,
+        total: orderedSpecs.length,
+        detail: `Мод ${spec.label}...`,
+      });
+    }
+    results.push(await ensureMod(spec.id, {
       signal,
       log,
-      label: mod.label,
-      pattern: mod.pattern,
-      onProgress: () => {
-        // The version line is already logged by ensureMod; avoid duplicates.
-      },
-    });
-    results.push(result);
+      label: spec.label,
+      pattern: spec.pattern,
+      info: entry.info,
+      sourcePath: entry.sourcePath,
+    }));
   }
   return results;
+}
+
+async function ensureShaderMods(gameVersion, { enabled = true, repairExisting = false, signal, log, onProgress } = {}) {
+  if (!enabled) {
+    if (!repairExisting) return [];
+    const iris = localModEntry(IRIS_MOD);
+    const sodium = localModEntry(SODIUM_MOD);
+    if (!iris || !sodium) return [];
+    const issues = collectIssues(iris, [sodium]);
+    if (!issues.length) {
+      if (log) log(`Sodium ${sodium.meta.version} и Iris ${iris.meta.version} совместимы`, 'info');
+      return [];
+    }
+    if (log) log(`Sodium/Iris несовместимы: ${issues[0].reason}. Ищу совместимую пару...`, 'warn');
+    const selected = await resolveModSet([IRIS_MOD, SODIUM_MOD], gameVersion, { signal, log });
+    return installResolvedMods(selected, { signal, log, onProgress });
+  }
+
+  if (onProgress) onProgress({ stage: 'mods', index: 0, total: SHADER_MODS.length, detail: 'Проверяю новые версии и совместимость...' });
+  let selected;
+  try {
+    selected = await resolveModSet(RESOLVE_ORDER, gameVersion, { signal, log });
+  } catch (error) {
+    if (signal?.aborted) throw abortError();
+    const iris = localModEntry(IRIS_MOD);
+    const sodium = localModEntry(SODIUM_MOD);
+    if (iris && sodium) {
+      const issues = collectIssues(iris, [sodium]);
+      if (!issues.length) {
+        if (log) log(`Не удалось проверить обновления (${error.message}); оставляю совместимые Sodium ${sodium.meta.version} и Iris ${iris.meta.version}`, 'warn');
+        return [];
+      }
+      throw new Error(`Не удалось обновить Sodium/Iris: ${error.message}. Установленная пара тоже несовместима: ${issues[0].reason}`);
+    }
+    throw new Error(`Не удалось подобрать совместимые версии модов: ${error.message}`);
+  }
+  return installResolvedMods(selected, { signal, log, onProgress });
 }
 
 async function ensureVoiceChat(gameVersion, { enabled = true, signal, log, onProgress } = {}) {
@@ -373,6 +713,8 @@ function shaderFilesStatus() {
 
 module.exports = {
   SHADER_MODS,
+  SODIUM_MOD,
+  IRIS_MOD,
   SHADER_PACK,
   ANIMATIONS_PACK,
   VOICE_CHAT_MOD,
@@ -385,4 +727,5 @@ module.exports = {
   setResourcePack,
   shaderFilesStatus,
   findModrinthFile,
+  resolveModSet,
 };

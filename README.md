@@ -1,4 +1,4 @@
-# URALCRAFT Launcher 2.2
+# URALCRAFT Launcher 2.2.1
 
 Современный лаунчер Minecraft для сервера **CAIIIEHbKA & Friends**.  
 Windows 10/11 x64 · Minecraft **26.3** · Fabric · Java 25 · шейдеры · offline-аккаунт.
@@ -10,6 +10,7 @@ Windows 10/11 x64 · Minecraft **26.3** · Fabric · Java 25 · шейдеры �
 - Запускает **Minecraft 26.3** с сервера `31.25.31.112:22222`.
 - Сам скачивает клиент Mojang, библиотеки, ресурсы и **Temurin JRE 25**.
 - Поддерживает **Fabric + Sodium + Iris** и шейдерпак **Complementary Reimagined**.
+- Подбирает Sodium под установленный Iris по зависимости Modrinth, поэтому автообновление Sodium больше не ломает запуск.
 - Включает **Fresh Animations**, FSR-апскейл **RenderScale** и последнюю
   совместимую release-версию **Simple Voice Chat** для Fabric.
 - Вкладка **«Серверы»** — красивый список с добавлением, редактированием
@@ -47,8 +48,8 @@ Windows 10/11 x64 · Minecraft **26.3** · Fabric · Java 25 · шейдеры �
 ## Как поставить друзьям
 
 1. Взять из папки `release/` один из файлов:
-   - `URALCRAFT-Setup-2.2.0.exe` — обычный установщик;
-   - `URALCRAFT-Portable-2.2.0.exe` — портативная версия без установки.
+   - `URALCRAFT-Setup-2.2.1.exe` — обычный установщик;
+   - `URALCRAFT-Portable-2.2.1.exe` — портативная версия без установки.
 2. Запустить, ввести свой ник.
 3. Нажать **«Погнали»** и дождаться первой загрузки.
 4. Играть.
@@ -65,9 +66,9 @@ Windows 10/11 x64 · Minecraft **26.3** · Fabric · Java 25 · шейдеры �
 
 Готовые файлы лежат в `release/`:
 
-- `URALCRAFT-Setup-2.2.0.exe` — установщик;
-- `URALCRAFT-Portable-2.2.0.exe` — портативная версия;
-- `URALCRAFT-2.2.0-Windows.zip` — оба файла + короткая памятка.
+- `URALCRAFT-Setup-2.2.1.exe` — установщик;
+- `URALCRAFT-Portable-2.2.1.exe` — портативная версия;
+- `URALCRAFT-2.2.1-Windows.zip` — оба файла + короткая памятка.
 
 ## Что внутри
 
@@ -206,4 +207,4 @@ build/                   иконка приложения
 ---
 
 Сделано для Сашеньки и его друзей.  
-URALCRAFT 2.2 · 2026
+URALCRAFT 2.2.1 · 2026
